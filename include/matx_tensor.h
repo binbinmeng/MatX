@@ -53,7 +53,7 @@ static constexpr bool PRINT_ON_DEVICE = false;
 
 // forward declare
 namespace matx {
-template <typename T, int RANK> class tensor_t;
+template <typename T, int RANK> class tensor_impl_t;
 } // namespace matx
 
 /* Special values used to indicate properties of tensors */
@@ -75,11 +75,10 @@ enum {
 #endif
 
 
-
 /**
  * View of an underlying tensor data object
  *
- * The tensor_t class provides multiple ways to view the data inside of a
+ * The tensor_impl_t class provides multiple ways to view the data inside of a
  * matxTensorData_t object. Views do not modify the underlying data; they simply
  * present a different way to look at the data. This includes where the data
  * begins and ends, the stride, the rank, etc. Views are very lightweight, and
@@ -89,40 +88,36 @@ enum {
  * using multiple views on the same data. Failure to do so can result in race
  * conditions on the device or host.
  */
-template <typename T, int RANK> 
-class tensor_t : public tensor_impl_t<T,RANK> {
+template <typename T, int RANK, typename Storage = basic_storage<smart_pointer_buffer>, typename Desc = tensor_desc_cr_disi_dist<RANK>> 
+class tensor_impl_t {
 public:
   // Type specifier for reflection on class
   using type = T; // TODO is this necessary
   using scalar_type = T;
-  using tensor_view = bool;
 
-  // Type specifier for signaling this is a matx operation
+  // Type specifier for signaling this is a matx operation or tensor view
   using matxop = bool;
+  using tensor_view = bool;  
 
 
   // /**
   //  * @brief Conversion to basic tensor implementation
   //  * 
   //  */
-  // operator tensor_impl_t<T,RANK>() {
-  //   return tensor_impl_t<T, RANK>{ldata_, shape_, s_};
+  // operator tensor_impl_t<T, RANK, Storage, Desc>() {
+  //   return tensor_impl_t<T, RANK, Storage, Desc>{ldata_, shape_, s_};
   // }
 
   // Delete default constructor for ranks higher than 0
-  template <int M = RANK, std::enable_if_t<M >= 1, bool> = true>
+  template <std::enable_if_t<RANK >= 1, bool> = true>
   tensor_t() = delete;
 
-  __MATX_HOST__ tensor_t<T, RANK>(tensor_t<T, RANK> const &rhs) noexcept
-      : tensor_impl_t<T,RANK>(rhs.ldata_, 
-          rhs.shape_, 
-          rhs.s_), 
-        data_(rhs.data_)
+  __MATX_HOST__ tensor_t<T, RANK, Storage, Desc>(tensor_t<T, RANK, Storage, Desc> const &rhs) noexcept
+      : storage_(rhs.storage), desc_(rhs.desc), offset_(offset)
   { }
 
-  __MATX_HOST__ tensor_t<T, RANK>(tensor_t<T, RANK> const &&rhs) noexcept
-      : tensor_impl_t<T,RANK>(rhs.ldata_, rhs.shape_, rhs.s_), 
-        data_(std::move(rhs.data_))  
+  __MATX_HOST__ tensor_t<T, RANK, Storage, Desc>(tensor_t<T, RANK, Storage, Desc> const &&rhs) noexcept
+      : storage_(std::move(rhs.storage_)), desc_(std::move(rhs.desc_)), offset_(std::move(offset)) 
   { }
 
   /** Perform a shallow copy of a tensor view
@@ -134,21 +129,20 @@ public:
    * @param rhs
    *   Tensor to copy from
    */
-  __MATX_HOST__ void Shallow(const tensor_t<T, RANK> &rhs) noexcept
+  __MATX_HOST__ void Shallow(const tensor_impl_t<T, RANK, Storage, Desc> &rhs) noexcept
   {
-    data_ = rhs.data_;
-    this->ldata_ = rhs.ldata_;
-    this->shape_ = rhs.shape_;
-    this->s_ = rhs.s_;
+    storage_ = rhs.storage_;
+    desc_ = rhs.desc_;
+    offset_ = rhs.offset_;
   }
 
-  __MATX_INLINE__  ~tensor_t() = default;
+  __MATX_INLINE__  ~tensor_impl_t() = default;
 
   /**
    * Constructor for a rank-0 tensor (scalar).
    */
   template <int M = RANK, std::enable_if_t<M == 0, bool> = true> 
-  tensor_t()
+  tensor_impl_t()
   {
     Allocate();
   }
@@ -160,8 +154,8 @@ public:
    *   Data pointer
    */
   template <int M = RANK, std::enable_if_t<M == 0, bool> = true>
-  tensor_t(T *const data) :
-    tensor_impl_t<T,RANK>(data), 
+  tensor_impl_t(T *const data) :
+    tensor_impl_t<T, RANK, Storage, Desc>(data), 
     data_(std::move(std::shared_ptr<T>{data, [](auto){}}))
   { }
 
@@ -172,8 +166,8 @@ public:
    *   Shared data pointer
    */
   template <int M = RANK, std::enable_if_t<M == 0, bool> = true>
-  tensor_t(std::shared_ptr<T> data) :
-    tensor_impl_t<T,RANK>(data.get()), 
+  tensor_impl_t(std::shared_ptr<T> data) :
+    tensor_impl_t<T, RANK, Storage, Desc>(data.get()), 
     data_(data)
   { }  
 
@@ -183,8 +177,8 @@ public:
    * @param shape
    *   Tensor shape
    */
-  __MATX_INLINE__ tensor_t(tensorShape_t<RANK> const &shape) :
-    tensor_impl_t<T, RANK>(shape)
+  __MATX_INLINE__ tensor_impl_t(tensorShape_t<RANK> const &shape) :
+    tensor_impl_t<T, RANK, Storage, Desc>(shape)
   {
     Allocate();
   }
@@ -197,9 +191,9 @@ public:
    * @param strides
    *   Tensor strides
    */
-  __MATX_INLINE__ tensor_t(tensorShape_t<RANK> const &shape,
+  __MATX_INLINE__ tensor_impl_t(tensorShape_t<RANK> const &shape,
                   const index_t (&strides)[RANK])
-      : tensor_impl_t<T,RANK>(shape, strides)
+      : tensor_impl_t<T, RANK, Storage, Desc>(shape, strides)
   {
     Allocate();
   }
@@ -210,8 +204,8 @@ public:
    * @param shape
    *   Sizes for each dimension. Length of sizes must match RANK
    */
-  __MATX_INLINE__ tensor_t(const index_t (&shape)[RANK])
-      : tensor_t(tensorShape_t<RANK>{static_cast<index_t const *>(shape)})
+  __MATX_INLINE__ tensor_impl_t(const index_t (&shape)[RANK])
+      : tensor_impl_t(tensorShape_t<RANK>{static_cast<index_t const *>(shape)})
   {
   }
 
@@ -226,9 +220,9 @@ public:
    * @param shape
    *   Sizes for each dimension. Length of sizes must match RANK
    */
-  __MATX_INLINE__ tensor_t(T *const data, T *const ldata,
+  __MATX_INLINE__ tensor_impl_t(T *const data, T *const ldata,
                   const tensorShape_t<RANK> &shape)
-      : tensor_impl_t<T,RANK>(ldata, shape),
+      : tensor_impl_t<T, RANK, Storage, Desc>(ldata, shape),
         data_(std::move(std::shared_ptr<T>{data, [](auto){}}))
   { }
 
@@ -243,9 +237,9 @@ public:
    * @param shape
    *   Sizes for each dimension. Length of sizes must match RANK
    */
-  __MATX_INLINE__ tensor_t(std::shared_ptr<T> data, T *const ldata,
+  __MATX_INLINE__ tensor_impl_t(std::shared_ptr<T> data, T *const ldata,
                   const tensorShape_t<RANK> &shape)
-      : tensor_impl_t<T,RANK>(ldata, shape),
+      : tensor_impl_t<T, RANK, Storage, Desc>(ldata, shape),
         data_(data)
   { }  
 
@@ -260,8 +254,8 @@ public:
    * @param shape
    *   Tensor shape
    */
-  __MATX_INLINE__ tensor_t(T *const data, const tensorShape_t<RANK> &shape)
-      : tensor_t(data, data, shape)
+  __MATX_INLINE__ tensor_impl_t(T *const data, const tensorShape_t<RANK> &shape)
+      : tensor_impl_t(data, data, shape)
   {
   }
 
@@ -276,8 +270,8 @@ public:
    * @param shape
    *   Tensor shape
    */
-  __MATX_INLINE__ tensor_t(std::shared_ptr<T> data, const tensorShape_t<RANK> &shape)
-      : tensor_t(data, data, shape)
+  __MATX_INLINE__ tensor_impl_t(std::shared_ptr<T> data, const tensorShape_t<RANK> &shape)
+      : tensor_impl_t(data, data, shape)
   {
   }  
 
@@ -293,8 +287,8 @@ public:
    * @param shape
    *   Sizes for each dimension. Length of sizes must match RANK
    */
-  __MATX_INLINE__ tensor_t(T *const data, const index_t (&shape)[RANK]) noexcept
-      : tensor_t(data, data,
+  __MATX_INLINE__ tensor_impl_t(T *const data, const index_t (&shape)[RANK]) noexcept
+      : tensor_impl_t(data, data,
                  tensorShape_t<RANK>{static_cast<index_t const *>(shape)})
   {
   }
@@ -314,10 +308,10 @@ public:
    * @param strides
    *   Tensor strides
    */
-  __MATX_INLINE__ tensor_t(T *const data, T *const ldata,
+  __MATX_INLINE__ tensor_impl_t(T *const data, T *const ldata,
                   tensorShape_t<RANK> const &shape,
                   const index_t (&strides)[RANK])
-      : tensor_impl_t<T,RANK>(ldata, shape, strides),
+      : tensor_impl_t<T, RANK, Storage, Desc>(ldata, shape, strides),
         data_(std::move(std::shared_ptr<T>{data, [](auto){}}))
   { }
 
@@ -336,10 +330,10 @@ public:
    * @param strides
    *   Tensor strides
    */
-  __MATX_INLINE__ tensor_t(std::shared_ptr<T> data, T *const ldata,
+  __MATX_INLINE__ tensor_impl_t(std::shared_ptr<T> data, T *const ldata,
                   tensorShape_t<RANK> const &shape,
                   const index_t (&strides)[RANK])
-      : tensor_impl_t<T,RANK>(ldata, shape, strides),
+      : tensor_impl_t<T, RANK, Storage, Desc>(ldata, shape, strides),
         data_(data)
   { }  
 
@@ -356,9 +350,9 @@ public:
    * @param strides
    *   Tensor strides
    */
-  __MATX_INLINE__ tensor_t(T *const data, tensorShape_t<RANK> const &shape,
+  __MATX_INLINE__ tensor_impl_t(T *const data, tensorShape_t<RANK> const &shape,
                   const index_t (&strides)[RANK])
-      : tensor_t(data, data, shape, strides)
+      : tensor_impl_t(data, data, shape, strides)
   {
   }
 
@@ -374,7 +368,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, op);
     }
@@ -405,7 +399,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator+=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator+=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this + op);
     }
@@ -437,7 +431,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator-=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator-=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this - op);
     }
@@ -469,7 +463,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator*=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator*=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this * op);
     }
@@ -501,7 +495,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator/=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator/=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this / op);
     }
@@ -533,7 +527,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator<<=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator<<=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this << op);
     }
@@ -565,7 +559,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator>>=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator>>=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this >> op);
     }
@@ -597,7 +591,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator|=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator|=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this | op);
     }
@@ -629,7 +623,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator&=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator&=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this & op);
     }
@@ -661,7 +655,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator^=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator^=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this ^ op);
     }
@@ -693,7 +687,7 @@ public:
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator%=(const tensor_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator%=(const tensor_impl_t<T, RANK, Storage, Desc> &op)
     {
         return set(*this, *this % op);
     }
@@ -752,7 +746,7 @@ public:
    *    A view of the data with the appropriate strides and dimensions set
    */
   template <typename M = T, int R = RANK>
-  __MATX_INLINE__ tensor_t<M, R> View(tensorShape_t<R> const &shape) const
+  __MATX_INLINE__ tensor_impl_t<M, R> View(tensorShape_t<R> const &shape) const
   {
     // Ensure new shape's total size is not larger than the original
     MATX_ASSERT_STR(
@@ -770,11 +764,11 @@ public:
       strides[i] = strides[i + 1] * shape.Size(i + 1);
     }
 
-    return tensor_t<M, R>(data_, data_.get(), shape, strides);
+    return tensor_impl_t<M, R>(data_, data_.get(), shape, strides);
   }
 
   template <typename M = T, int R = RANK>
-  __MATX_INLINE__ tensor_t<M, R> View(const index_t (&shape)[R]) const
+  __MATX_INLINE__ tensor_impl_t<M, R> View(const index_t (&shape)[R]) const
   {
     return View(tensorShape_t<R>{(const index_t *)shape});
   }
@@ -789,7 +783,7 @@ public:
    * @return
    *    A view of the data with the appropriate strides and dimensions set
    */
-  __MATX_INLINE__ tensor_t<T, RANK> View() const noexcept
+  __MATX_INLINE__ tensor_impl_t<T, RANK, Storage, Desc> View() const noexcept
   {
     // RANK == 0 will essentially be optimized out and unused in later checks
     index_t strides[RANK];
@@ -802,7 +796,7 @@ public:
       strides[i] = strides[i + 1] * this->Size(i + 1);
     }
 
-    return tensor_t<T, RANK>(data_, data_.get(), this->shape_, strides);
+    return tensor_impl_t<T, RANK, Storage, Desc>(data_, data_.get(), this->shape_, strides);
   }
 
   /**
@@ -847,11 +841,11 @@ public:
    *
    */
 #ifdef DOXYGEN_ONLY
-  tensor_t RealView() const noexcept
+  tensor_impl_t RealView() const noexcept
   {
 #else
   template <typename U = T, std::enable_if_t<is_complex_v<U>, bool> = true>
-  __MATX_INLINE__ tensor_t<typename U::value_type, RANK> RealView() const noexcept
+  __MATX_INLINE__ tensor_impl_t<typename U::value_type, RANK> RealView() const noexcept
   {
 #endif
     using Type = typename U::value_type;
@@ -869,7 +863,7 @@ public:
       }
     }
 
-    return tensor_t<Type, RANK>(reinterpret_cast<Type *>(data_.get()), data, this->shape_,
+    return tensor_impl_t<Type, RANK>(reinterpret_cast<Type *>(data_.get()), data, this->shape_,
                                 strides);
   }
 
@@ -882,11 +876,11 @@ public:
    *
    */
 #ifdef DOXYGEN_ONLY
-  tensor_t ImagView() const noexcept
+  tensor_impl_t ImagView() const noexcept
   {
 #else
   template <typename U = T, std::enable_if_t<is_complex_v<U>, bool> = true>
-  __MATX_INLINE__ tensor_t<typename U::value_type, RANK> ImagView() const noexcept
+  __MATX_INLINE__ tensor_impl_t<typename U::value_type, RANK> ImagView() const noexcept
   {
 #endif
     using Type = typename U::value_type;
@@ -904,7 +898,7 @@ public:
       }
     }
 
-    return tensor_t<Type, RANK>(reinterpret_cast<Type *>(data_.get()), data, this->shape_,
+    return tensor_impl_t<Type, RANK>(reinterpret_cast<Type *>(data_.get()), data, this->shape_,
                                 strides);
   }
 
@@ -924,11 +918,11 @@ public:
    *
    */
 #ifdef DOXYGEN_ONLY
-  tensor_t Permute(const uint32_t (&dims)[RANK]) const
+  tensor_impl_t Permute(const uint32_t (&dims)[RANK]) const
   {
 #else
   template <int M = RANK, std::enable_if_t<M >= 2, bool> = true>
-  __MATX_INLINE__ tensor_t Permute(const uint32_t (&dims)[RANK]) const
+  __MATX_INLINE__ tensor_impl_t Permute(const uint32_t (&dims)[RANK]) const
   {
 #endif
     index_t n[RANK];
@@ -947,7 +941,7 @@ public:
       s[i] = this->s_[d];
     }
 
-    return tensor_t(data_, data_.get(), n, s);
+    return tensor_impl_t(data_, data_.get(), n, s);
   }
 
   /**
@@ -967,11 +961,11 @@ public:
    *
    */
 #ifdef DOXYGEN_ONLY
-  tensor_t PermuteMatrix() const
+  tensor_impl_t PermuteMatrix() const
   {
 #else
   template <int M = RANK>
-  __MATX_INLINE__ std::enable_if_t<M >= 2, tensor_t> PermuteMatrix() const
+  __MATX_INLINE__ std::enable_if_t<M >= 2, tensor_impl_t> PermuteMatrix() const
   {
 #endif
     uint32_t tdims[RANK];
@@ -1125,13 +1119,13 @@ public:
    *
    */
 #ifdef DOXYGEN_ONLY
-  tensor_t<T, RANK + 1>
+  tensor_impl_t<T, RANK + 1>
   OverlapView(std::initializer_list<index_t> const &windows,
               std::initializer_list<index_t> const &strides) const
   {
 #else
   template <int M = RANK, std::enable_if_t<M == 1, bool> = true>
-  __MATX_INLINE__ tensor_t<T, RANK + 1>
+  __MATX_INLINE__ tensor_impl_t<T, RANK + 1>
   OverlapView(std::initializer_list<index_t> const &windows,
               std::initializer_list<index_t> const &strides) const
   {
@@ -1159,7 +1153,7 @@ public:
     n[0] = adj_el / stride_size + 1;
     s[0] = stride_size;
 
-    return tensor_t<T, RANK + 1>(data_, data_.get(), n, s);
+    return tensor_impl_t<T, RANK + 1>(data_, data_.get(), n, s);
   }
 
   /**
@@ -1188,11 +1182,11 @@ public:
    *
    */
 #ifdef DOXYGEN_ONLY
-  tensor_t<T, N> Clone(const index_t (&clones)[N]) const
+  tensor_impl_t<T, N> Clone(const index_t (&clones)[N]) const
   {
 #else
   template <int N, std::enable_if_t<(N <= 4 && N > RANK), bool> = true>
-  __MATX_INLINE__ tensor_t<T, N> Clone(const index_t (&clones)[N]) const
+  __MATX_INLINE__ tensor_impl_t<T, N> Clone(const index_t (&clones)[N]) const
   {
 #endif
     index_t n[N], s[N];
@@ -1221,7 +1215,7 @@ public:
     MATX_ASSERT_STR(d == RANK, matxInvalidDim,
                     "Must keep as many dimension as the original tensor has");
 
-    return tensor_t<T, N>(data_, data_.get(), n, s);
+    return tensor_impl_t<T, N>(data_, data_.get(), n, s);
   }
 
   /**
@@ -1459,14 +1453,14 @@ public:
    *
    */
 #ifdef DOXYGEN_ONLY
-  tensor_t<T, N> Slice(const index_t (&firsts)[RANK],
+  tensor_impl_t<T, N> Slice(const index_t (&firsts)[RANK],
                        const index_t (&ends)[RANK],
                        const index_t (&strides)[RANK]) const
   {
 #else
   template <int N = RANK,
             std::enable_if_t<(N <= RANK && RANK > 0), bool> = true>
-  __MATX_INLINE__ tensor_t<T, N> Slice([[maybe_unused]] const index_t (&firsts)[RANK],
+  __MATX_INLINE__ tensor_impl_t<T, N> Slice([[maybe_unused]] const index_t (&firsts)[RANK],
                               [[maybe_unused]] const index_t (&ends)[RANK],
                               [[maybe_unused]] const index_t (&strides)[RANK]) const
   {
@@ -1516,7 +1510,7 @@ public:
     MATX_ASSERT_STR(d == N, matxInvalidDim,
                     "Number of indices must match the target rank to slice to");
 
-    return tensor_t<T, N>(data_, data, n, s);
+    return tensor_impl_t<T, N>(data_, data, n, s);
   }
 
   /**
@@ -1544,12 +1538,12 @@ public:
    *
    */
 #ifdef DOXYGEN_ONLY
-  tensor_t<T, N> Slice(const index_t (&firsts)[RANK],
+  tensor_impl_t<T, N> Slice(const index_t (&firsts)[RANK],
                        const index_t (&ends)[RANK]) const
   {
 #else
   template <int N = RANK, std::enable_if_t<(N <= RANK && RANK > 0), bool> = true>
-  __MATX_INLINE__ tensor_t<T, N> Slice(const index_t (&firsts)[RANK],
+  __MATX_INLINE__ tensor_impl_t<T, N> Slice(const index_t (&firsts)[RANK],
                               const index_t (&ends)[RANK]) const
   {
 #endif
@@ -1711,7 +1705,7 @@ public:
         PrintKernel<<<1, 1>>>(*this, dims...);
       }
       else {
-        tensor_t<T, RANK> tmpv(this->shape_, (const index_t(&)[RANK])this->s_);
+        tensor_impl_t<T, RANK, Storage, Desc> tmpv(this->shape_, (const index_t(&)[RANK])this->s_);
         cudaMemcpy(tmpv.Data(), this->Data(), tmpv.Bytes(),
                    cudaMemcpyDeviceToHost);
         tmpv.Print(dims...);
@@ -1765,86 +1759,12 @@ private:
     this->ldata_ = tmp;
   }
 
-  std::shared_ptr<T> data_; // Starting data pointer to this tensor view
+  Storage storage_;
+  Desc desc_;
+  int64_t offset;
 };
 
-
-
-
-// make_tensor helpers
-/**
- * Create a 0D tensor with managed memory
- *
- **/
-template <typename T>
-auto make_tensor() {
-  return tensor_t<T,0>{};
-}
-
-/**
- * Create a 0D tensor with user memory
- *
- * @param data
- *   Pointer to device data
- **/
-template <typename T>
-auto make_tensor(T *const data) {
-  return tensor_t<T,0>{data};
-}
-
-/**
- * Create a tensor with managed memory
- *
- * @param shape
- *   Shape of tensor
- **/
-template <typename T, int RANK>
-auto make_tensor(const index_t (&shape)[RANK]) {
-  return tensor_t<T,RANK>{shape};
-}
-
-/**
- * Create a tensor with managed memory
- *
- * @param shape
- *   Shape of tensor
- * @param strides
- *   Strides of tensor
- **/
-template <typename T, int RANK>
-auto make_tensor(const index_t (&shape)[RANK], const index_t (&strides)[RANK]) {
-  return tensor_t<T,RANK>{shape, strides};
-}
-
-
-/**
- * Create a tensor with user memory
- *
- * @param data
- *   Pointer to device data
- * @param shape
- *   Shape of tensor
- **/
-template <typename T, int RANK>
-tensor_t<T,RANK> make_tensor(T *const data, const index_t (&shape)[RANK]) {
-  return tensor_t<T,RANK>{data, shape};
-}
-
-
-/**
- * Create a tensor with user memory
- *
- * @param data
- *   Pointer to device data
- * @param shape
- *   Shape of tensor
- * @param strides
- *   Strides of tensor
- **/
-template <typename T, int RANK>
-tensor_t<T,RANK> make_tensor(T *const data, const index_t (&shape)[RANK], const index_t (&strides)[RANK]) {
-  return tensor_t<T,RANK>{data, shape, strides};
-}
-
+template <typename Storage, typename Desc>
+using tensor_impl_adv_t = tensor_impl_t<typename Storage::T, Desc::Rank(), Storage, Desc>;
 
 } // end namespace matx

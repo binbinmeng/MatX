@@ -72,7 +72,7 @@ public:
 
 
 /**
- * @brief Bare implementation of tensor class
+ * @brief Bare implementation of tensor class for use on devices
  * 
  * Defines the minimum operations needed for a tensor to be useful. This class
  * should be limited to primitive types. The bare class contains operations that
@@ -82,13 +82,13 @@ public:
  * This class is designed to be inherited from more capable tensor classes like
  * tensor_t below. Because of the asynchronous nature of GPU devices, derived classes
  * are responsible for handling ownership and lifetime of the pointer in a 
- * tensor_impl_t. 
+ * device_tensor_t. 
  * 
  * @tparam T Type of tensor
  * @tparam RANK Rank of tensor
  */
 template <typename T, int RANK> 
-class tensor_impl_t {
+class device_tensor_t {
   public:
     // Type specifier for reflection on class
     using type = T; // TODO is this necessary
@@ -98,23 +98,23 @@ class tensor_impl_t {
     // Type specifier for signaling this is a matx operation
     using matxop = bool;
 
-    __MATX_HOST__ __MATX_DEVICE__ tensor_impl_t<T, RANK>(tensor_impl_t<T, RANK> const &rhs) noexcept
+    __MATX_HOST__ __MATX_DEVICE__ device_tensor_t<T, RANK>(device_tensor_t<T, RANK> const &rhs) noexcept
         : ldata_(rhs.ldata_), shape_(rhs.shape_), s_(rhs.s_) { }
 
-    __MATX_HOST__ __MATX_DEVICE__ tensor_impl_t<T, RANK>(tensor_impl_t<T, RANK> const &&rhs) noexcept
+    __MATX_HOST__ __MATX_DEVICE__ device_tensor_t<T, RANK>(device_tensor_t<T, RANK> const &&rhs) noexcept
         : ldata_(rhs.ldata_), shape_(rhs.shape_), s_(rhs.s_) { }
 
-    __MATX_HOST__ __MATX_DEVICE__ tensor_impl_t<T, RANK>(T *const ldata,
+    __MATX_HOST__ __MATX_DEVICE__ device_tensor_t<T, RANK>(T *const ldata,
                   const tensorShape_t<RANK> &shape, const std::array<index_t, RANK> strides) noexcept
         : ldata_(ldata), shape_(shape), s_(strides) { }        
 
 
-    __MATX_INLINE__ ~tensor_impl_t() = default;
+    __MATX_INLINE__ __MATX_HOST__ __MATX_DEVICE__ ~device_tensor_t() = default;
 
     /**
      * Constructor for a rank-0 tensor (scalar).
      */
-    template <int M = RANK, std::enable_if_t<M == 0, bool> = true> tensor_impl_t() {};
+    template <int M = RANK, std::enable_if_t<M == 0, bool> = true> device_tensor_t() {};
 
     /**
      * Constructor for a rank-0 tensor (scalar).
@@ -123,7 +123,7 @@ class tensor_impl_t {
      *   Data pointer
      */
     template <int M = RANK, std::enable_if_t<M == 0, bool> = true>
-    tensor_impl_t(T *const data) : ldata_(data) { }
+    device_tensor_t(T *const data) : ldata_(data) { }
 
     /**
      * Constructor for a rank-1 and above tensor.
@@ -131,7 +131,7 @@ class tensor_impl_t {
      * @param shape
      *   Tensor shape
      */
-    __MATX_INLINE__ tensor_impl_t(tensorShape_t<RANK> const &shape) : shape_(shape)
+    __MATX_INLINE__ device_tensor_t(tensorShape_t<RANK> const &shape) : shape_(shape)
     {
       for (int i = 0; i < RANK; i++) {
         MATX_ASSERT_STR(shape.Size(i) > 0, matxInvalidSize,
@@ -156,7 +156,7 @@ class tensor_impl_t {
      * @param strides
      *   Tensor strides
      */
-    __MATX_INLINE__ tensor_impl_t(tensorShape_t<RANK> const &shape, const index_t (&strides)[RANK])
+    __MATX_INLINE__ device_tensor_t(tensorShape_t<RANK> const &shape, const index_t (&strides)[RANK])
         : shape_(shape)
     {
       for (int i = 0; i < RANK; i++) {
@@ -173,8 +173,8 @@ class tensor_impl_t {
      * @param shape
      *   Sizes for each dimension. Length of sizes must match RANK
      */
-    __MATX_INLINE__ tensor_impl_t(const index_t (&shape)[RANK])
-        : tensor_impl_t(tensorShape_t<RANK>{static_cast<index_t const *>(shape)})
+    __MATX_INLINE__ device_tensor_t(const index_t (&shape)[RANK])
+        : device_tensor_t(tensorShape_t<RANK>{static_cast<index_t const *>(shape)})
     {
     }
 
@@ -191,7 +191,7 @@ class tensor_impl_t {
      * @param refcnt
      *   Reference counter or nullptr if not tracked
      */
-    __MATX_INLINE__ tensor_impl_t(T *const ldata, const tensorShape_t<RANK> &shape)
+    __MATX_INLINE__ device_tensor_t(T *const ldata, const tensorShape_t<RANK> &shape)
         : ldata_(ldata), shape_(shape)
     {
       for (int i = 0; i < RANK; i++) {
@@ -221,8 +221,8 @@ class tensor_impl_t {
      * @param shape
      *   Sizes for each dimension. Length of sizes must match RANK
      */
-    __MATX_INLINE__ tensor_impl_t(T *const data, const index_t (&shape)[RANK]) noexcept
-        : tensor_impl_t(data, tensorShape_t<RANK>{static_cast<index_t const *>(shape)})
+    __MATX_INLINE__ device_tensor_t(T *const data, const index_t (&shape)[RANK]) noexcept
+        : device_tensor_t(data, tensorShape_t<RANK>{static_cast<index_t const *>(shape)})
     {
     }
     
@@ -244,7 +244,7 @@ class tensor_impl_t {
      * @param refcnt
      *   Reference counter or nullptr if not tracked
      */
-    __MATX_INLINE__ tensor_impl_t(T *const ldata,
+    __MATX_INLINE__ device_tensor_t(T *const ldata,
                     tensorShape_t<RANK> const &shape,
                     const index_t (&strides)[RANK])
         : ldata_(ldata), shape_(shape)
@@ -269,7 +269,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, op);
     }
@@ -300,7 +300,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator+=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator+=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this + op);
     }
@@ -332,7 +332,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator-=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator-=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this - op);
     }
@@ -364,7 +364,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator*=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator*=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this * op);
     }
@@ -396,7 +396,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator/=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator/=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this / op);
     }
@@ -428,7 +428,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator<<=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator<<=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this << op);
     }
@@ -460,7 +460,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator>>=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator>>=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this >> op);
     }
@@ -492,7 +492,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator|=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator|=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this | op);
     }
@@ -524,7 +524,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator&=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator&=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this & op);
     }
@@ -556,7 +556,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator^=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator^=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this ^ op);
     }
@@ -588,7 +588,7 @@ class tensor_impl_t {
      * @returns set object containing the destination view and source object
      *
      */
-    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator%=(const tensor_impl_t<T, RANK> &op)
+    [[nodiscard]] __MATX_INLINE__ __MATX_HOST__ auto operator%=(const device_tensor_t<T, RANK> &op)
     {
         return set(*this, *this % op);
     }
